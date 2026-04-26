@@ -177,8 +177,13 @@ def calculate_response_image(input_image, K):
 
     """INSERT YOUR CODE HERE.
     REPLACE THE resonse_image WITH THE RESPONSE IMAGE YOU CALCULATED."""
-
-    response_image = np.random.uniform(size=Ix.shape)
+    g = np.ones((5, 5))
+    Sxx = signal.convolve2d(np.square(Ix), g, mode='same')
+    Syy = signal.convolve2d(np.square(Iy), g, mode='same')
+    Sxy = signal.convolve2d(np.multiply(Ix, Iy), g, mode='same')
+    det_M = np.multiply(Sxx, Syy) - np.square(Sxy)
+    trace_M = Sxx + Syy
+    response_image = det_M - K * np.square(trace_M)
     return response_image
 
 

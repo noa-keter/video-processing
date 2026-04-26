@@ -146,6 +146,8 @@ def create_grad_x_and_grad_y(input_image):
     else:
         gray_image = input_image
 
+    gray_image = gray_image.astype(np.float32)
+
     # Create shifted image to the right for Ix
     gray_shifted_right = np.zeros_like(gray_image)
     gray_shifted_right[:, 1:] = gray_image[:, :-1]
@@ -156,7 +158,7 @@ def create_grad_x_and_grad_y(input_image):
 
     Ix = gray_image - gray_shifted_right
     Iy = gray_image - gray_shifted_bottom
-    return Ix, Iy
+    return Ix[1:,1:], Iy[1:,1:]
 
 
 def calculate_response_image(input_image, K):

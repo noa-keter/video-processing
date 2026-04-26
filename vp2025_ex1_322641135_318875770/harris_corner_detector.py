@@ -6,8 +6,8 @@ from matplotlib import pyplot as plt
 
 
 # replace these with your IDs:
-ID1 = '123456789'
-ID2 = '987654321'
+ID1 = '322641134'
+ID2 = '318875770'
 
 # Harris corner detector parameters - you may change them.
 K = 0.05
@@ -37,7 +37,7 @@ def bgr_image_to_rgb_image(bgr_image):
         image and in the third dimension, swap the first and last slices.
     """
     rgb_image = bgr_image.copy()
-    """INSERT YOUR CODE HERE."""
+    rgb_image = rgb_image.swapaxes(0,2)
     return rgb_image
 
 
@@ -57,7 +57,7 @@ def black_and_white_image_to_tiles(arr, nrows, ncols):
     """INSERT YOUR CODE HERE.
     REPLACE THE RETURNED VALUE WITH YOUR OWN IMPLEMENTATION.
     """
-    return np.random.uniform(size=((h//nrows) * (w //ncols), nrows, ncols))
+    return arr.reshape(shape=(h//nrows * w//ncols, nrows, ncols))
 
 
 def image_tiles_to_black_and_white_image(arr, h, w):

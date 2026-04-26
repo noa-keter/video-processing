@@ -140,11 +140,22 @@ def create_grad_x_and_grad_y(input_image):
         nof_color_channels = 3
         height, width, _ = input_image.shape
 
-    """INSERT YOUR CODE HERE.
-    REPLACE THE VALUES FOR Ix AND Iy WITH THE GRADIENTS YOU COMPUTED.
-    """
-    Ix = np.random.uniform(size=(height, width))
-    Iy = np.random.uniform(size=(height, width))
+    # Convert to grayscale if needed
+    if nof_color_channels == 3:
+        gray_image = cv2.cvtColor(input_image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray_image = input_image
+
+    # Create shifted image to the right for Ix
+    gray_shifted_right = np.zeros_like(gray_image)
+    gray_shifted_right[:, 1:] = gray_image[:, :-1]
+
+    # Create shifted image to the bottom for Iy
+    gray_shifted_bottom = np.zeros_like(gray_image)
+    gray_shifted_bottom[1:, :] = gray_image[:-1, :]
+
+    Ix = gray_image - gray_shifted_right
+    Iy = gray_image - gray_shifted_bottom
     return Ix, Iy
 
 

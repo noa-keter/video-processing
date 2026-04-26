@@ -37,7 +37,7 @@ def bgr_image_to_rgb_image(bgr_image):
         image and in the third dimension, swap the first and last slices.
     """
     rgb_image = bgr_image.copy()
-    rgb_image = rgb_image.swapaxes(0,2)
+    rgb_image = rgb_image[:, :, ::-1]
     return rgb_image
 
 

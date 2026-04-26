@@ -157,8 +157,12 @@ def create_grad_x_and_grad_y(input_image):
     gray_shifted_bottom[1:, :] = gray_image[:-1, :]
 
     Ix = gray_image - gray_shifted_right
+    # Remove the first column from Ix
+    Ix[:, 0] = 0
     Iy = gray_image - gray_shifted_bottom
-    return Ix[1:,1:], Iy[1:,1:]
+    # Remove the first row from Iy
+    Iy[0, :] = 0
+    return Ix, Iy
 
 
 def calculate_response_image(input_image, K):
@@ -188,8 +192,6 @@ def calculate_response_image(input_image, K):
     # compute Ix and Iy
     Ix, Iy = create_grad_x_and_grad_y(input_image)
 
-    """INSERT YOUR CODE HERE.
-    REPLACE THE resonse_image WITH THE RESPONSE IMAGE YOU CALCULATED."""
     g = np.ones((5, 5))
     Sxx = signal.convolve2d(np.square(Ix), g, mode='same')
     Syy = signal.convolve2d(np.square(Iy), g, mode='same')

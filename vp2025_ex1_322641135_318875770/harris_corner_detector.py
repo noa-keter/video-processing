@@ -228,9 +228,21 @@ def our_harris_corner_detector(input_image, K, threshold):
     ones where the image from (3) is larger than the threshold.
     """
     response_image = calculate_response_image(input_image, K)
-    """INSERT YOUR CODE HERE.
-    REPLACE THE output_image WITH THE BINARY MAP YOU COMPUTED."""
-    output_image = np.random.uniform(size=response_image.shape)
+    # Convert the response image to tiles of 25x25
+    response_image_tiles = black_and_white_image_to_tiles(response_image, 25, 25)
+    # Apply Non-Maximal Suppression per tile:
+    flat_tiles = response_image_tiles.reshape(response_image_tiles.shape[0], -1)
+    argmax_flat_tiles = flat_tiles.argmax(axis=1)
+    row_i, col_i = np.unravel_index(argmax_flat_tiles, response_image_tiles.shape[1:])
+    response_image_tiles_nms = np.zeros(response_image_tiles.shape)
+    response_image_tiles_nms[np.arange(response_image_tiles.shape[0]), row_i, col_i] = response_image_tiles[np.arange(response_image_tiles.shape[0]), row_i, col_i]
+    # Convert tiles back to an image
+    response_image_nms = image_tiles_to_black_and_white_image(response_image_tiles_nms,
+                                                              response_image.shape[0],
+                                                              response_image.shape[1])
+    # Create a binary image with ones where the response is larger than
+    output_image = np.zeros_like(response_image)
+    output_image[response_image_nms > threshold] = 1
     return output_image
 
 

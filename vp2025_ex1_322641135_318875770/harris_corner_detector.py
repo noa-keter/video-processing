@@ -345,4 +345,4 @@ def main(to_save=False):
 
 
 if __name__ == "__main__":
-    main(to_save=False)
+    main(to_save=True)

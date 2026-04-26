@@ -73,10 +73,11 @@ def image_tiles_to_black_and_white_image(arr, h, w):
     Take inspiration from: https://stackoverflow.com/questions/16873441/form-a-big-2d-array-from-multiple-smaller-2d-arrays
     """
     n, nrows, ncols = arr.shape
-    """INSERT YOUR CODE HERE.
-    REPLACE THE RETURNED VALUE WITH YOUR OWN IMPLEMENTATION.
-    """
-    return np.random.uniform(size=(h, w))
+    # Arranging the tiles back into 2D array.
+    # Replacing the rows with cols to match the original image shape. 
+    # Reshaping the tiles structure back into hxw image
+    image = arr.reshape(h // nrows, w // ncols, nrows, ncols).swapaxes(1, 2).reshape(h, w)
+    return image
 
 
 def test_tiles_functions(to_save=False):

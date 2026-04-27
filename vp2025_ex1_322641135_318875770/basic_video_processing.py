@@ -44,12 +44,24 @@ def convert_video_to_grayscale(input_video_path, output_video_path):
     Additional References:
     (1) What are fourcc parameters:
     https://docs.microsoft.com/en-us/windows/win32/medfound/video-fourccs
+    """
+    capture_obj = cv2.VideoCapture(input_video_path)
+    if not capture_obj.isOpened():
+        raise IOError(f"Could not open video {input_video_path}")
+    parameters = get_video_parameters(capture_obj)
+    video_writer = cv2.VideoWriter(output_video_path, parameters["fourcc"], parameters["fps"], (parameters["width"], parameters["height"]))
+    # Iterate over the frames and convert them to grayscale
+    while True:
+        ret, frame = capture_obj.read()
+        if not ret:
+            break
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_frame_bgr = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
+        video_writer.write(gray_frame_bgr)
 
-    """
-    """INSERT YOUR CODE HERE.
-    REMOVE THE pass KEYWORD AND IMPLEMENT YOUR OWN CODE.
-    """
-    pass
+    capture_obj.release()
+    video_writer.release()
+    cv2.destroyAllWindows()
 
 
 def convert_video_to_black_and_white(input_video_path, output_video_path):
@@ -108,8 +120,8 @@ def convert_video_to_sobel(input_video_path, output_video_path):
 
 def main():
     convert_video_to_grayscale(INPUT_VIDEO, GRAYSCALE_VIDEO)
-    convert_video_to_black_and_white(INPUT_VIDEO, BLACK_AND_WHITE_VIDEO)
-    convert_video_to_sobel(INPUT_VIDEO, SOBEL_VIDEO)
+    # convert_video_to_black_and_white(INPUT_VIDEO, BLACK_AND_WHITE_VIDEO)
+    # convert_video_to_sobel(INPUT_VIDEO, SOBEL_VIDEO)
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@ import os
 import cv2
 
 
-ID1 = '123456789'
-ID2 = '987654321'
+ID1 = '322641135'
+ID2 = '318875770'
 
 INPUT_VIDEO = 'atrium.avi'
 GRAYSCALE_VIDEO = f'{ID1}_{ID2}_atrium_grayscale.avi'

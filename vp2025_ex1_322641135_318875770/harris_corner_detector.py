@@ -12,7 +12,7 @@ ID2 = '318875770'
 # Harris corner detector parameters - you may change them.
 K = 0.05
 CHECKERBOARD_THRESHOLD = 1e2
-GIRAFFE_THRESHOLD = 1e9
+GIRAFFE_THRESHOLD = 8e8
 BUTTERFLY_IMAGE = 'butterfly.jpg'
 
 # Do not change the following constants:

@@ -16,8 +16,8 @@ ID2 = '318875770'
 
 # Choose parameters
 WINDOW_SIZE_RIVER = 5  # Add your value here!
-MAX_ITER_RIVER = 10  # Add your value here!
-NUM_LEVELS_RIVER = 5
+MAX_ITER_RIVER = 8  # Add your value here!
+NUM_LEVELS_RIVER = 4
 
 # Output dir and statistics file preparations:
 RIVER_DIR = 'river_results'

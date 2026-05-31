@@ -286,6 +286,12 @@ def lucas_kanade_optical_flow(I1: np.ndarray,
             next_shape = pyarmid_I2[level - 1].shape
             u = cv2.resize(u, (next_shape[1], next_shape[0])) * 2
             v = cv2.resize(v, (next_shape[1], next_shape[0])) * 2
+    if u.shape != I1.shape:
+        target_height, target_width = I1.shape
+        u_scale = target_width / u.shape[1]
+        v_scale = target_height / v.shape[0]
+        u = cv2.resize(u, (target_width, target_height)) * u_scale
+        v = cv2.resize(v, (target_width, target_height)) * v_scale
     return u, v
 
 
@@ -340,7 +346,92 @@ def lucas_kanade_video_stabilization(input_video_path: str,
        all windows.
     """
     """INSERT YOUR CODE HERE."""
-    pass
+    # Open the input video and read its parameters.
+    input_cap = cv2.VideoCapture(input_video_path)
+    video_params = get_video_parameters(input_cap)
+    
+    width = video_params['width']
+    height = video_params['height']
+    fps = video_params['fps']
+    frame_count = video_params['frame_count']
+    
+    # Create the output writer using the same parameters.
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    # Use isColor=False because we are processing and writing grayscale frames
+    out_cap = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height), isColor=False)
+    
+    # Convert the first frame to grayscale and write it directly.
+    ret, first_frame = input_cap.read()
+    if not ret:
+        input_cap.release()
+        out_cap.release()
+        return
+
+    prev_frame_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    out_cap.write(prev_frame_gray)
+    
+    # Resize the first frame to a pyramid-friendly size.
+    h_factor = int(np.ceil(height / (2 ** (num_levels - 1))))
+    w_factor = int(np.ceil(width / (2 ** (num_levels - 1))))
+    IMAGE_SIZE = (w_factor * (2 ** (num_levels - 1)), 
+                  h_factor * (2 ** (num_levels - 1)))
+    
+    prev_frame_resized = cv2.resize(prev_frame_gray, IMAGE_SIZE)
+    
+    # Initialize cumulative shifts in the original frame size.
+    u = np.zeros((height, width), dtype=np.float32)
+    v = np.zeros((height, width), dtype=np.float32)
+    
+    # Half-window size used to ignore boundary pixels.
+    half_w = window_size // 2
+
+    # Process the rest of the frames.
+    for _ in tqdm(range(1, frame_count), desc="Stabilizing Video"):
+        ret, frame = input_cap.read()
+        if not ret:
+            break
+            
+        curr_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Resize current frame to match the flow estimation size.
+        curr_frame_resized = cv2.resize(curr_frame_gray, IMAGE_SIZE)
+        
+        # Estimate flow between consecutive resized frames.
+        du, dv = lucas_kanade_optical_flow(prev_frame_resized, 
+                                           curr_frame_resized, 
+                                           window_size, 
+                                           max_iter, 
+                                           num_levels)
+        
+        # Compute mean flow over the valid region (exclude borders).
+        if half_w > 0:
+            valid_du = du[half_w:-half_w, half_w:-half_w]
+            valid_dv = dv[half_w:-half_w, half_w:-half_w]
+        else:
+            valid_du = du
+            valid_dv = dv
+            
+        mean_du = np.nanmean(valid_du)
+        mean_dv = np.nanmean(valid_dv)
+        
+        # Accumulate mean shifts to align back to the first frame.
+        u += mean_du
+        v += mean_dv
+        
+        # Warp the current frame using the cumulative shifts.
+        warped_frame = warp_image(curr_frame_gray, u, v)
+        
+        # Convert back to uint8 properly for VideoWriter
+        warped_frame_uint8 = np.clip(warped_frame, 0, 255).astype(np.uint8)
+        out_cap.write(warped_frame_uint8)
+        
+        # Keep the resized frame for the next iteration.
+        prev_frame_resized = curr_frame_resized
+        
+    # Release resources.
+    input_cap.release()
+    out_cap.release()
+    cv2.destroyAllWindows()
 
 
 def faster_lucas_kanade_step(I1: np.ndarray,
@@ -371,6 +462,39 @@ def faster_lucas_kanade_step(I1: np.ndarray,
     """INSERT YOUR CODE HERE.
     Calculate du and dv correctly.
     """
+    height, width = I1.shape
+    if min(height, width) <= window_size * 5:
+        return lucas_kanade_step(I1, I2, window_size)
+
+    I2_float = I2.astype(np.float32)
+    corner_response = cv2.cornerHarris(I2_float, 2, 3, 0.04)
+    threshold = 0.01 * corner_response.max()
+    corner_points = np.argwhere(corner_response > threshold)
+
+    Ix = signal.convolve2d(I2, X_DERIVATIVE_FILTER, boundary='symm', mode='same')
+    Iy = signal.convolve2d(I2, Y_DERIVATIVE_FILTER, boundary='symm', mode='same')
+    It = I2 - I1
+
+    half_window = window_size // 2
+
+    for row, col in corner_points:
+        if (row - half_window < 0 or row + half_window >= height or
+                col - half_window < 0 or col + half_window >= width):
+            continue
+
+        Ix_window = Ix[row - half_window:row + half_window + 1,
+                       col - half_window:col + half_window + 1]
+        Iy_window = Iy[row - half_window:row + half_window + 1,
+                       col - half_window:col + half_window + 1]
+        It_window = It[row - half_window:row + half_window + 1,
+                       col - half_window:col + half_window + 1]
+
+        A = np.stack((Ix_window.flatten(), Iy_window.flatten()), axis=1)
+        b = -It_window.flatten()
+
+        flow, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+        du[row, col] = flow[0]
+        dv[row, col] = flow[1]
     return du, dv
 
 
@@ -406,8 +530,29 @@ def faster_lucas_kanade_optical_flow(
     v = np.zeros(pyarmid_I2[-1].shape)  # create v in the size of smallest image
     """INSERT YOUR CODE HERE.
     Replace u and v with their true value."""
-    u = np.zeros(I1.shape)
-    v = np.zeros(I1.shape)
+    for level in range(num_levels, -1, -1):
+        I1_level = pyramid_I1[level]
+        I2_level = pyarmid_I2[level]
+
+        I2_warp = warp_image(I2_level, u, v)
+
+        for i in range(max_iter):
+            du, dv = faster_lucas_kanade_step(I1_level, I2_warp, window_size)
+            u += du
+            v += dv
+            I2_warp = warp_image(I2_level, u, v)
+
+        if level > 0:
+            next_shape = pyarmid_I2[level - 1].shape
+            u = cv2.resize(u, (next_shape[1], next_shape[0])) * 2
+            v = cv2.resize(v, (next_shape[1], next_shape[0])) * 2
+
+    if u.shape != I1.shape:
+        target_height, target_width = I1.shape
+        u_scale = target_width / u.shape[1]
+        v_scale = target_height / v.shape[0]
+        u = cv2.resize(u, (target_width, target_height)) * u_scale
+        v = cv2.resize(v, (target_width, target_height)) * v_scale
     return u, v
 
 
@@ -427,7 +572,97 @@ def lucas_kanade_faster_video_stabilization(
         None.
     """
     """INSERT YOUR CODE HERE."""
-    pass
+   # Open input video
+    capture = cv2.VideoCapture(input_video_path)
+    if not capture.isOpened():
+        return
+
+    # Prepare output video writer using input parameters
+    params = get_video_parameters(capture)
+    fourcc = cv2.VideoWriter_fourcc(*"XVID") # [cite: 204]
+    writer = cv2.VideoWriter(
+        output_video_path,
+        fourcc,
+        params["fps"],
+        (params["width"], params["height"]),
+        isColor=False,
+    )
+
+    # Read first frame and write it as-is
+    ret, prev_frame = capture.read()
+    if not ret:
+        capture.release()
+        writer.release()
+        return
+
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    writer.write(prev_gray)
+
+    # Resize frames to pyramid-friendly size
+    h_factor = int(np.ceil(params["height"] / (2 ** (num_levels - 1))))
+    w_factor = int(np.ceil(params["width"] / (2 ** (num_levels - 1))))
+    image_size = (w_factor * (2 ** (num_levels - 1)),
+                  h_factor * (2 ** (num_levels - 1)))
+
+    prev_gray_resized = cv2.resize(prev_gray, image_size)
+
+    # Initialize cumulative shifts in the shape of the resized image
+    u = np.zeros((image_size[1], image_size[0]), dtype=np.float32)
+    v = np.zeros((image_size[1], image_size[0]), dtype=np.float32)
+
+    half_window = window_size // 2
+
+    for _ in tqdm(range(1, params["frame_count"]), desc="Faster LK Stabilizing"):
+        ret, frame = capture.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_resized = cv2.resize(gray, image_size)
+
+        # Estimate optical flow between consecutive frames using the faster method
+        du, dv = faster_lucas_kanade_optical_flow(
+            prev_gray_resized,
+            gray_resized,
+            window_size,
+            max_iter,
+            num_levels,
+        )
+
+        # Compute mean shift over valid region (exclude borders)
+        if half_window > 0:
+            valid_du = du[half_window:-half_window, half_window:-half_window]
+            valid_dv = dv[half_window:-half_window, half_window:-half_window]
+        else:
+            valid_du = du
+            valid_dv = dv
+
+        # Isolate only the actual corner shifts
+        non_zero_du = valid_du[valid_du != 0]
+        non_zero_dv = valid_dv[valid_dv != 0]
+
+        # Calculate mean safely
+        du_mean = np.mean(non_zero_du) if len(non_zero_du) > 0 else 0.0
+        dv_mean = np.mean(non_zero_dv) if len(non_zero_dv) > 0 else 0.0
+
+        # Accumulate motion using NumPy broadcasting
+        u += du_mean
+        v += dv_mean
+
+        # Warp the ORIGINAL high-res frame using the resized u and v matrices
+        stabilized = warp_image(gray, u, v)
+        
+        # Clip and convert to correct dtype for OpenCV VideoWriter
+        stabilized_uint8 = np.clip(stabilized, 0, 255).astype(np.uint8)
+        writer.write(stabilized_uint8)
+
+        # Update reference frame
+        prev_gray_resized = gray_resized
+
+    # Clean up resources
+    capture.release()
+    writer.release()
+    cv2.destroyAllWindows()
 
 
 def lucas_kanade_faster_video_stabilization_fix_effects(
@@ -451,6 +686,105 @@ def lucas_kanade_faster_video_stabilization_fix_effects(
         None.
     """
     """INSERT YOUR CODE HERE."""
-    pass
+    capture = cv2.VideoCapture(input_video_path)
+    if not capture.isOpened():
+        return
+
+    params = get_video_parameters(capture)
+    output_height = params["height"] - start_rows - end_rows
+    output_width = params["width"] - start_cols - end_cols
+    if output_height <= 0 or output_width <= 0:
+        capture.release()
+        return
+
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    writer = cv2.VideoWriter(
+        output_video_path,
+        fourcc,
+        params["fps"],
+        (output_width, output_height),
+        isColor=False,
+    )
+
+    ret, prev_frame = capture.read()
+    if not ret:
+        capture.release()
+        writer.release()
+        return
+
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    cropped_prev = prev_gray[start_rows:params["height"] - end_rows,
+                             start_cols:params["width"] - end_cols]
+    writer.write(cropped_prev)
+
+    h_factor = int(np.ceil(params["height"] / (2 ** (num_levels - 1))))
+    w_factor = int(np.ceil(params["width"] / (2 ** (num_levels - 1))))
+    image_size = (w_factor * (2 ** (num_levels - 1)),
+                  h_factor * (2 ** (num_levels - 1)))
+
+    prev_gray_resized = cv2.resize(prev_gray, image_size)
+
+    u_cumulative = np.zeros(prev_gray_resized.shape)
+    v_cumulative = np.zeros(prev_gray_resized.shape)
+    total_u = 0.0
+    total_v = 0.0
+
+    half_window = window_size // 2
+
+    for i in tqdm(
+        range(1, params["frame_count"]),
+        desc="Faster LK (no-borders)",
+        leave=False,
+        position=0,
+        dynamic_ncols=False,
+        ncols=80,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+    ):
+        ret, frame = capture.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_resized = cv2.resize(gray, image_size)
+
+        du, dv = faster_lucas_kanade_optical_flow(
+            prev_gray_resized,
+            gray_resized,
+            window_size,
+            max_iter,
+            num_levels,
+        )
+
+        if du.shape != u_cumulative.shape:
+            target_height, target_width = u_cumulative.shape
+            u_scale = target_width / du.shape[1]
+            v_scale = target_height / du.shape[0]
+            du = cv2.resize(du, (target_width, target_height)) * u_scale
+            dv = cv2.resize(dv, (target_width, target_height)) * v_scale
+
+        valid_rows = slice(half_window, -half_window or None)
+        valid_cols = slice(half_window, -half_window or None)
+        du_mean = np.mean(du[valid_rows, valid_cols])
+        dv_mean = np.mean(dv[valid_rows, valid_cols])
+
+        du = np.full_like(du, du_mean)
+        dv = np.full_like(dv, dv_mean)
+
+        total_u += du_mean
+        total_v += dv_mean
+        u_cumulative = np.full_like(u_cumulative, total_u)
+        v_cumulative = np.full_like(v_cumulative, total_v)
+
+        stabilized = warp_image(gray_resized, u_cumulative, v_cumulative)
+        stabilized = cv2.resize(stabilized, (params["width"], params["height"]))
+        cropped = stabilized[start_rows:params["height"] - end_rows,
+                             start_cols:params["width"] - end_cols]
+        writer.write(cropped.astype(prev_gray.dtype))
+
+        prev_gray_resized = gray_resized
+
+    capture.release()
+    writer.release()
+    cv2.destroyAllWindows()
 
 

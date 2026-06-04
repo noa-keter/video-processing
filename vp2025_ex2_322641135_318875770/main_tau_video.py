@@ -14,7 +14,7 @@ ID2 = '318875770'
 # Choose parameters
 WINDOW_SIZE_TAU = 7  # Add your value here!
 MAX_ITER_TAU = 6  # Add your value here!
-NUM_LEVELS_TAU = 5  # Add your value here!
+NUM_LEVELS_TAU = 3  # Add your value here!
 
 
 # Output dir and statistics file preparations:

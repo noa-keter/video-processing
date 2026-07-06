@@ -1,20 +1,10 @@
 """
-Video stabilization (feature-based, 2D similarity motion model).
+Feature-based video stabilization with a 2D similarity motion model.
 
-Pipeline (matches the course Optical-Flow notes):
-  1. Detect corner features on frame i        -> Harris corner detector (sec. 2.5,
-                                                  response option (c), alpha=0.04)
-  2. Track them to frame i+1                   -> Lucas-Kanade pyramidal flow (sec. 2.2 / 2.4)
-     + forward-backward consistency check to drop unreliable tracks.
-  3. Fit a global 2D similarity transform      -> OUR OWN least-squares fit inside OUR OWN
-     to the surviving correspondences             RANSAC loop (sec. 1.3 / 2.3). RANSAC rejects
-                                                   the walking person's outlier motion.
-  4. Accumulate frame-to-frame motion into a camera trajectory and SMOOTH it (our code).
-  5. Warp each frame onto the smoothed path (rotation + translation only; scale dropped
-     because measured scale drift is < 0.1%, so the subject is never distorted).
-
-Only OpenCV feature-detection / optical-flow are used as building blocks; the motion model,
-RANSAC, trajectory and smoothing are implemented here.
+Track corners between frames to estimate how the camera moved, build the camera
+path over the clip, flatten it (the camera is meant to be still), and warp each
+frame back so the background stops shaking. OpenCV is only used for the Harris
+detector and the LK tracker; the fit, RANSAC, trajectory and smoothing are ours.
 """
 
 import cv2
@@ -22,36 +12,22 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 
-# ----------------------------------------------------------------------------- #
-#  Our own 2D similarity model fit (least squares) + RANSAC
-# ----------------------------------------------------------------------------- #
 def fit_similarity_lsq(pts0, pts1):
     """
-    Least-squares 2D similarity that maps pts0 -> pts1.
-
-    Similarity model (linear in a, b, tx, ty):
-        x' = a*x - b*y + tx
-        y' = b*x + a*y + ty
-    where a = s*cos(theta), b = s*sin(theta).
-
-    Returns (a, b, tx, ty) or None if degenerate.
+    Least-squares 2D similarity mapping pts0 -> pts1. The model
+        x' = a*x - b*y + tx,  y' = b*x + a*y + ty   (a = s*cos, b = s*sin)
+    is linear in (a, b, tx, ty), so we stack all points and solve. None if n < 2.
     """
     n = len(pts0)
     if n < 2:
         return None
-    x = pts0[:, 0]
-    y = pts0[:, 1]
-    xp = pts1[:, 0]
-    yp = pts1[:, 1]
+    x, y = pts0[:, 0], pts0[:, 1]
+    xp, yp = pts1[:, 0], pts1[:, 1]
 
-    # Build the stacked linear system A p = c  (2n x 4).
+    # each point -> two rows: even row is its x' eq, odd row its y' eq
     A = np.zeros((2 * n, 4), dtype=np.float64)
-    A[0::2, 0] = x      # a
-    A[0::2, 1] = -y     # b
-    A[0::2, 2] = 1.0    # tx
-    A[1::2, 0] = y      # a
-    A[1::2, 1] = x      # b
-    A[1::2, 3] = 1.0    # ty
+    A[0::2, 0] = x;   A[0::2, 1] = -y;  A[0::2, 2] = 1.0
+    A[1::2, 0] = y;   A[1::2, 1] = x;   A[1::2, 3] = 1.0
     c = np.empty(2 * n, dtype=np.float64)
     c[0::2] = xp
     c[1::2] = yp
@@ -69,9 +45,9 @@ def _apply_similarity(p, pts):
 
 def ransac_similarity(pts0, pts1, thresh=3.0, iters=200, rng=None):
     """
-    Our own RANSAC around the least-squares similarity fit.
-    Minimal sample = 2 point pairs (4 equations, 4 unknowns).
-    Returns (p, inlier_mask). Falls back to a plain LSQ fit if RANSAC finds nothing.
+    RANSAC around the similarity fit so bad matches (mostly the moving person)
+    don't skew it. Two pairs pin down a similarity; keep the largest inlier set
+    and refit on it. Returns (params, inlier_mask).
     """
     if rng is None:
         rng = np.random.default_rng(0)
@@ -79,88 +55,66 @@ def ransac_similarity(pts0, pts1, thresh=3.0, iters=200, rng=None):
     if n < 2:
         return None, None
 
-    best_inliers = None
-    best_count = -1
+    best_inliers, best_count = None, -1
     idx_all = np.arange(n)
-
     for _ in range(iters):
         sample = rng.choice(idx_all, size=2, replace=False)
         p = fit_similarity_lsq(pts0[sample], pts1[sample])
         if p is None:
             continue
-        proj = _apply_similarity(p, pts0)
-        err = np.linalg.norm(proj - pts1, axis=1)
+        err = np.linalg.norm(_apply_similarity(p, pts0) - pts1, axis=1)
         inliers = err < thresh
         cnt = int(inliers.sum())
         if cnt > best_count:
-            best_count = cnt
-            best_inliers = inliers
+            best_count, best_inliers = cnt, inliers
 
     if best_inliers is None or best_count < 2:
-        return fit_similarity_lsq(pts0, pts1), np.ones(n, bool)
-
-    # Refit on all inliers for a stable final estimate.
-    p_final = fit_similarity_lsq(pts0[best_inliers], pts1[best_inliers])
-    return p_final, best_inliers
+        return fit_similarity_lsq(pts0, pts1), np.ones(n, bool)  # nothing agreed, fit all
+    return fit_similarity_lsq(pts0[best_inliers], pts1[best_inliers]), best_inliers
 
 
-# ----------------------------------------------------------------------------- #
-#  Frame-to-frame motion estimation (features + LK + our RANSAC)
-# ----------------------------------------------------------------------------- #
-# Harris corner detector (sec. 2.5, response option (c): det(H) - alpha*trace(H)^2).
-# useHarrisDetector=True selects the Harris response; k is the alpha in {0.04..0.06}.
+# Harris response (useHarrisDetector=True, k = alpha). minDistance spreads corners
+# so motion is sampled across the whole frame, not just on the posters.
 _FEATURE_PARAMS = dict(maxCorners=800, qualityLevel=0.01, minDistance=8, blockSize=7,
                        useHarrisDetector=True, k=0.04)
+# maxLevel=3 pyramid so LK still catches the bigger shakes (~9 px measured).
 _LK_PARAMS = dict(winSize=(21, 21), maxLevel=3,
                   criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
 
 
 def estimate_pair_motion(prev_gray, cur_gray, rng):
     """
-    Returns (dx, dy, da) describing the camera motion from prev -> cur,
-    or None if estimation failed. Scale is measured but intentionally
-    dropped (kept implicitly = 1) because it is negligible on this footage.
+    Camera motion between two frames as (dx, dy, rotation), or None on failure.
+    Scale is fitted but dropped (< 0.1% here) so the person can't get stretched.
     """
     p0 = cv2.goodFeaturesToTrack(prev_gray, **_FEATURE_PARAMS)
     if p0 is None or len(p0) < 8:
         return None
 
     p1, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, cur_gray, p0, None, **_LK_PARAMS)
-    # Forward-backward check: track p1 back and require it to land near p0.
+    # forward-backward check: track back and keep only points that return home
     p0r, st2, _ = cv2.calcOpticalFlowPyrLK(cur_gray, prev_gray, p1, None, **_LK_PARAMS)
     fb_err = np.linalg.norm(p0 - p0r, axis=2).reshape(-1)
     good = (st.reshape(-1) == 1) & (st2.reshape(-1) == 1) & (fb_err < 1.0)
     if good.sum() < 8:
-        good = (st.reshape(-1) == 1)  # relax if too strict
+        good = (st.reshape(-1) == 1)  # too strict, fall back to forward tracks
 
-    a0 = p0.reshape(-1, 2)[good]
-    a1 = p1.reshape(-1, 2)[good]
+    a0, a1 = p0.reshape(-1, 2)[good], p1.reshape(-1, 2)[good]
     if len(a0) < 8:
         return None
 
-    p, inliers = ransac_similarity(a0, a1, thresh=3.0, iters=200, rng=rng)
+    p, _ = ransac_similarity(a0, a1, thresh=3.0, iters=200, rng=rng)
     if p is None:
         return None
     a, b, tx, ty = p
-    da = np.arctan2(b, a)      # rotation angle (radians)
-    return float(tx), float(ty), float(da)
+    return float(tx), float(ty), float(np.arctan2(b, a))
 
 
-# ----------------------------------------------------------------------------- #
-#  Trajectory smoothing (our code)
-# ----------------------------------------------------------------------------- #
 def smooth_trajectory(trajectory, sigma=25.0, static_camera=True):
     """
-    Produce the target camera path.
-
-    static_camera=True (default): the camera is nominally fixed (it does not pan to
-    follow the subject), so the ideal target is a single constant reference -- we
-    register every frame to the MEAN trajectory position. This removes both the
-    high-frequency jitter AND the slow drift, leaving a background that is static
-    across the whole clip (required for temporal-median background subtraction).
-    The mean minimises the worst-case black border.
-
-    static_camera=False: Gaussian-smooth each signal (keeps slow intentional motion).
+    Target camera path. Default: camera is static, so pin every frame to the mean
+    position - removes jitter and drift together (what background subtraction needs)
+    and keeps borders smallest. static_camera=False Gaussian-smooths instead.
     """
     smoothed = np.empty_like(trajectory)
     if static_camera:
@@ -172,20 +126,14 @@ def smooth_trajectory(trajectory, sigma=25.0, static_camera=True):
 
 
 def _build_affine(dx, dy, da):
-    """2x3 rigid (rotation + translation) matrix for warpAffine."""
     ca, sa = np.cos(da), np.sin(da)
-    return np.array([[ca, -sa, dx],
-                     [sa,  ca, dy]], dtype=np.float64)
+    return np.array([[ca, -sa, dx], [sa, ca, dy]], dtype=np.float64)
 
 
-# ----------------------------------------------------------------------------- #
-#  Public API
-# ----------------------------------------------------------------------------- #
 def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_camera=True):
     """
-    Pass 1: estimate per-frame motion, build + smooth the trajectory, and return
-    the list of correction transforms (one 2x3 rigid matrix per frame).
-    Returns (transforms, (n_frames, fps, w, h)).
+    Pass 1: estimate per-frame motion, accumulate + smooth the path, and return one
+    correction matrix per frame plus (n_frames, fps, w, h).
     """
     cap = cv2.VideoCapture(input_path)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -193,12 +141,11 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(0)  # fixed seed -> reproducible RANSAC
     ok, prev = cap.read()
     prev_gray = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
 
-    motions = []  # (dx, dy, da) for each consecutive pair
-    last = (0.0, 0.0, 0.0)
+    motions, last = [], (0.0, 0.0, 0.0)
     while True:
         ok, cur = cap.read()
         if not ok:
@@ -206,18 +153,17 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
         cur_gray = cv2.cvtColor(cur, cv2.COLOR_BGR2GRAY)
         m = estimate_pair_motion(prev_gray, cur_gray, rng)
         if m is None:
-            m = last          # reuse previous motion if a pair fails
+            m = last  # reuse last motion so the path stays continuous
         motions.append(m)
         last = m
         prev_gray = cur_gray
     cap.release()
 
-    motions = np.array(motions, dtype=np.float64)          # (n-1, 3)
-    # Trajectory: absolute camera path, one row per frame (frame 0 = origin).
-    trajectory = np.zeros((n, 3), dtype=np.float64)
+    motions = np.array(motions, dtype=np.float64)
+    trajectory = np.zeros((n, 3), dtype=np.float64)   # absolute path, frame 0 at origin
     trajectory[1:] = np.cumsum(motions, axis=0)
     smoothed = smooth_trajectory(trajectory, sigma=smoothing_sigma, static_camera=static_camera)
-    diff = smoothed - trajectory                            # correction per frame
+    diff = smoothed - trajectory                       # per-frame shift onto the smooth path
 
     transforms = [_build_affine(diff[i, 0], diff[i, 1], diff[i, 2]) for i in range(n)]
     return transforms, (n, fps, w, h)
@@ -225,9 +171,8 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
 
 def warp_frames(input_path, transforms):
     """
-    Pass 2 (generator): re-read each frame, apply its correction transform, and
-    yield (stabilized_bgr, valid_mask). valid_mask is True where the warp produced
-    real pixels (False on the black border) -- handed to background subtraction.
+    Pass 2 (generator): apply each correction, yielding (stabilized_bgr, valid_mask).
+    valid_mask marks real pixels vs. the black border, for background subtraction.
     """
     cap = cv2.VideoCapture(input_path)
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -241,6 +186,7 @@ def warp_frames(input_path, transforms):
         M = transforms[i]
         warped = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        # nearest-neighbour keeps the mask a clean yes/no (no grey border bleed)
         valid = cv2.warpAffine(ones, M, (w, h), flags=cv2.INTER_NEAREST,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
         yield warped, valid
@@ -250,16 +196,12 @@ def warp_frames(input_path, transforms):
 
 def stabilize(input_path, output_path, smoothing_sigma=25.0, static_camera=True, fourcc='XVID'):
     """
-    Full stabilization: writes the color stabilized video to output_path and
-    returns (transforms, meta) so downstream blocks can regenerate validity masks.
-    XVID is used by default so the .avi opens in the standard Windows player; it is
-    read back through OpenCV by the grader/matting stage regardless of codec.
+    End to end: run both passes, write the stabilized video, return (transforms, meta).
+    XVID so the .avi opens in Windows; OpenCV reads it back either way.
     """
     transforms, (n, fps, w, h) = compute_stabilizing_transforms(
         input_path, smoothing_sigma, static_camera)
     writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
-    if not writer.isOpened():  # fallback if the requested codec is unavailable
-        writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'MJPG'), fps, (w, h))
     for warped, _valid in warp_frames(input_path, transforms):
         writer.write(warped)
     writer.release()

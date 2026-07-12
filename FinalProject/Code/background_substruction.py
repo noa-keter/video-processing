@@ -31,8 +31,6 @@ import cv2
 import numpy as np
 from scipy import ndimage
 
-import stabilization as stab
-
 
 def _ellipse(size):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
@@ -116,14 +114,29 @@ def _temporal_fill(masks, keep_dist):
     return filled
 
 
-def run(input_path, transforms, meta, extracted_path, binary_path,
+def run(stabilized_path, transforms, meta, extracted_path, binary_path,
         dist2=300.0, fourcc='XVID'):
     """
     Build the KNN background model, classify + color-refine every stabilized frame,
     steady the masks in time, and write the extracted (color) and binary videos.
-    Returns the list of foreground masks.
+    Reads the already-written stabilized video once; the transforms are only used
+    to reproduce each frame's valid-pixel mask. Returns the list of foreground masks.
     """
     num_frames, fps, width, height = meta
+
+    cap = cv2.VideoCapture(stabilized_path)
+    frames = []
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frames.append(frame)
+    cap.release()
+
+    full_mask = np.full((height, width), 255, np.uint8)
+    valids = [cv2.warpAffine(full_mask, transform, (width, height), flags=cv2.INTER_NEAREST,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
+              for transform in transforms]
     # dist2Threshold is the color-distance cutoff for "same as background". It only
     # roughs out the mask - the color refinement redraws the boundary each frame - so
     # the exact value doesn't matter much. This is the one knob we tune.
@@ -133,7 +146,7 @@ def run(input_path, transforms, meta, extracted_path, binary_path,
     # pass 1: warm up the model, then (once warm, over the second half) measure the
     # person's HEIGHT so every size below scales to the person instead of fixed pixels.
     heights = []
-    for i, (frame, valid) in enumerate(stab.warp_frames(input_path, transforms)):
+    for i, (frame, valid) in enumerate(zip(frames, valids)):
         fg_mask = bg_model.apply(frame)
         if i >= num_frames // 2:
             mask = cv2.morphologyEx(((fg_mask == 255) & valid).astype(np.uint8),
@@ -152,7 +165,7 @@ def run(input_path, transforms, meta, extracted_path, binary_path,
 
     # pass 2: classify, clean, and color-refine each frame
     masks = []
-    for frame, valid in stab.warp_frames(input_path, transforms):
+    for frame, valid in zip(frames, valids):
         fg_mask = bg_model.apply(frame)            # 255 = foreground, 127 = shadow, 0 = background
         mask = _clean(((fg_mask == 255) & valid).astype(np.uint8), close_size, keep_dist)
         mask = _color_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist)
@@ -167,7 +180,7 @@ def run(input_path, transforms, meta, extracted_path, binary_path,
     # pass 3: write out, pairing each stabilized frame with its foreground mask
     ex_writer = cv2.VideoWriter(extracted_path, cv2.VideoWriter_fourcc(*fourcc), fps, (width, height))
     bin_writer = cv2.VideoWriter(binary_path, cv2.VideoWriter_fourcc(*fourcc), fps, (width, height))
-    for i, (frame, _valid) in enumerate(stab.warp_frames(input_path, transforms)):
+    for i, frame in enumerate(frames):
         mask = masks[i]
         extracted = frame.copy()
         extracted[mask == 0] = 0                   # foreground keeps its real colors, rest goes black

@@ -45,7 +45,7 @@ def main():
     print(f"[stabilization] elapsed: {timing['time_to_stabilize']:.1f}s")
 
     print(f"[background_substruction] extracting person")
-    bgs.run(INPUT_VIDEO, transforms, meta, EXTRACTED_VIDEO, BINARY_VIDEO, fourcc='XVID')
+    bgs.run(STABILIZED_VIDEO, transforms, meta, EXTRACTED_VIDEO, BINARY_VIDEO, fourcc='XVID')
     timing["time_to_binary"] = time.time() - t0
     print(f"[background_substruction] wrote {EXTRACTED_VIDEO} and {BINARY_VIDEO}")
     print(f"[background_substruction] elapsed: {timing['time_to_binary']:.1f}s")

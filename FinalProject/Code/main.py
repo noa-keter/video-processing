@@ -1,9 +1,6 @@
 """
-FinalProject pipeline entry point.
-Run from the project root:
+Pipeline entry point, run from the project root:
     python Code/main.py
-All paths are resolved relative to THIS file, so the script works regardless of
-the current working directory (no absolute paths are used, per the assignment).
 """
 import os
 import json
@@ -13,11 +10,10 @@ import tracking
 import stabilization as stab
 import background_substruction as bgs
 
-# --- Student IDs ------------------------------------------------------------- #
 ID1 = "318875770"
 ID2 = "322641135"
 
-# --- Project paths (relative to this file) ----------------------------------- #
+# all paths are relative to this file, so the script runs from any working directory
 CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CODE_DIR)
 INPUT_DIR = os.path.join(ROOT_DIR, "Inputs")

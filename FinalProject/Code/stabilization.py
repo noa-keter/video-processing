@@ -137,7 +137,6 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
     Pass 1: estimate per-frame motion, accumulate + smooth the path, and return one
     correction matrix per frame plus (n_frames, fps, w, h).
     """
-    # Get video parameters
     cap = cv2.VideoCapture(input_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

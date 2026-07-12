@@ -2,27 +2,20 @@
 Geodesic video matting.
 
 Turns a stabilized color frame and a binary person mask into a soft opacity map
-and a composite of the person over a new background.
+and a composite of the person over a new background. The mask is trusted away
+from the silhouette; only a thin band around the edge is re-decided, with a
+color model (Parzen KDE) plus geodesic distances from each side of the band.
 """
 
-from __future__ import annotations
-
 import heapq
+from collections import namedtuple
+
+import cv2
 import numpy as np
-from cv2 import (
-    MORPH_ELLIPSE,
-    INTER_LINEAR,
-    INTER_NEAREST,
-    getStructuringElement,
-    erode as cv_erode,
-    dilate as cv_dilate,
-    resize as cv_resize,
-)
-from dataclasses import dataclass
 from scipy.ndimage import distance_transform_edt
 
-BAND_RADIUS_PX = 9
-SAMPLE_RING_PX = 4
+BAND_RADIUS_PX = 9      # half-width of the undecided band around the silhouette
+SAMPLE_RING_PX = 4      # how far past the band boundary color samples are taken
 BBOX_PAD_PX = 16
 
 KDE_BANDWIDTH = 12.0
@@ -34,6 +27,8 @@ GEODESIC_SPATIAL_WEIGHT = 0.02
 ALPHA_DISTANCE_POWER = 1.0
 ALPHA_SCALE = 2         # downscale factor for the geodesic/KDE computation
 
+MASK_THRESHOLD = 127    # binary.avi is 0/255 (person = 255)
+VIDEO_FOURCC = "XVID"
 EPS = 1e-8
 
 # (drow, dcol, step) for the 8-neighborhood
@@ -43,54 +38,26 @@ _NEIGHBORS = (
     (1, -1, 2.0 ** 0.5), (1, 1, 2.0 ** 0.5),
 )
 
-
-@dataclass(frozen=True)
-class Trimap:
-    """
-    Trimap of a single frame.
-
-    Attributes:
-        fg: Confident-foreground mask (alpha == 1), full frame size.
-        bg: Confident-background mask (alpha == 0), full frame size.
-        band: Undecided band around the silhouette (alpha == phi), full frame size.
-        bbox: (row0, row1, col0, col1) bounding box of the band, used to crop the
-            frame for the per-band computation.
-    """
-
-    fg: np.ndarray
-    bg: np.ndarray
-    band: np.ndarray
-    bbox: tuple[int, int, int, int]
+# fg = confident foreground (alpha 1), bg = confident background (alpha 0),
+# band = undecided ring between them, bbox = (row0, row1, col0, col1) crop
+# around the band - all the per-frame work happens inside it.
+Trimap = namedtuple("Trimap", ["fg", "bg", "band", "bbox"])
 
 
-def _disk(radius_px: int) -> np.ndarray:
+def _disk(radius_px):
     size = 2 * radius_px + 1
-    return getStructuringElement(MORPH_ELLIPSE, (size, size))
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
 
-def build_trimap(
-    mask: np.ndarray,
-    *,
-    band_radius_px: int = BAND_RADIUS_PX,
-    bbox_pad_px: int = BBOX_PAD_PX,
-) -> Trimap:
+def build_trimap(mask, band_radius_px=BAND_RADIUS_PX, bbox_pad_px=BBOX_PAD_PX):
     """
-    Split a binary person mask into confident FG/BG and an undecided band.
-
-    The band is the set of pixels within band_radius_px of the mask silhouette.
-
-    Args:
-        mask: 2-D boolean (or 0/1) array, True where the person is.
-        band_radius_px: Half-width of the undecided band around the silhouette.
-        bbox_pad_px: Extra padding added around the band bounding box.
-
-    Returns:
-        The Trimap for this frame.
+    Split a binary person mask into confident fg/bg and the undecided band:
+    everything within band_radius_px of the mask silhouette.
     """
     mask_u8 = (mask > 0).astype(np.uint8)
 
-    inner = cv_erode(mask_u8, _disk(band_radius_px)).astype(bool)
-    outer = cv_dilate(mask_u8, _disk(band_radius_px)).astype(bool)
+    inner = cv2.erode(mask_u8, _disk(band_radius_px)).astype(bool)
+    outer = cv2.dilate(mask_u8, _disk(band_radius_px)).astype(bool)
     band = outer & ~inner
     fg = inner          # alpha == 1, borders the band on the inside
     bg = ~outer         # alpha == 0, borders the band on the outside
@@ -108,17 +75,15 @@ def build_trimap(
     return Trimap(fg, bg, band, (row0, row1, col0, col1))
 
 
-def _subsample(colors: np.ndarray, max_samples: int) -> np.ndarray:
+def _subsample(colors, max_samples):
     if colors.shape[0] <= max_samples:
         return colors
     idx = np.random.default_rng(0).choice(colors.shape[0], max_samples, replace=False)
     return colors[idx]
 
 
-def _parzen_density(query: np.ndarray, samples: np.ndarray, bandwidth: float) -> np.ndarray:
-    """
-    Gaussian Parzen density f(c) = mean_j exp(-||c - s_j||^2 / 2 sigma^2).
-    """
+def _parzen_density(query, samples, bandwidth):
+    """Gaussian Parzen density f(c) = mean_j exp(-||c - s_j||^2 / 2 sigma^2)."""
     if samples.shape[0] == 0:
         return np.zeros(query.shape[0])
 
@@ -131,15 +96,8 @@ def _parzen_density(query: np.ndarray, samples: np.ndarray, bandwidth: float) ->
     return density
 
 
-def _foreground_posterior(
-    colors: np.ndarray,
-    region: np.ndarray,
-    fg_samples: np.ndarray,
-    bg_samples: np.ndarray,
-) -> np.ndarray:
-    """
-    Posterior P(F|c) = f(c|F) / (f(c|F) + f(c|B)) with equal priors, over `region`.
-    """
+def _foreground_posterior(colors, region, fg_samples, bg_samples):
+    """Posterior P(F|c) = f(c|F) / (f(c|F) + f(c|B)) with equal priors, over `region`."""
     prob = np.zeros(colors.shape[:2])
     query = colors[region].astype(np.float64)
     f_fg = _parzen_density(query, fg_samples, KDE_BANDWIDTH)
@@ -148,21 +106,13 @@ def _foreground_posterior(
     return prob
 
 
-def _geodesic_distance(prob_fg: np.ndarray, seeds: np.ndarray, allowed: np.ndarray) -> np.ndarray:
+def _geodesic_distance(prob_fg, seeds, allowed):
     """
-    Geodesic distance from `seeds` to every allowed pixel via Dijkstra.
-
-    The edge weight between neighbors a, b penalizes crossing a color edge:
-
+    Geodesic distance from `seeds` to every `allowed` pixel via Dijkstra. The edge
+    weight between neighbors penalizes crossing a color edge:
         w(a, b) = color_weight * |P_F(a) - P_F(b)| + spatial_weight * step
-
-    Args:
-        prob_fg: Foreground posterior P(F|c) over the crop.
-        seeds: Pixels with distance 0 (sources).
-        allowed: Pixels the paths may traverse.
-
-    Returns:
-        Distance array; np.inf where unreachable / outside `allowed`.
+    so the distance follows object outlines instead of cutting through them.
+    Unreachable pixels stay at np.inf.
     """
     h, w = prob_fg.shape
     dist = np.full((h, w), np.inf)
@@ -194,26 +144,10 @@ def _geodesic_distance(prob_fg: np.ndarray, seeds: np.ndarray, allowed: np.ndarr
     return dist
 
 
-def estimate_alpha(
-    frame_bgr: np.ndarray,
-    trimap: Trimap,
-    *,
-    distance_power: float = ALPHA_DISTANCE_POWER,
-) -> np.ndarray:
+def estimate_alpha(frame_bgr, trimap, distance_power=ALPHA_DISTANCE_POWER):
     """
-    Estimate the opacity map alpha in [0, 1] for a single frame.
-
-    Confident FG gets 1, confident BG gets 0, and band pixels get
-    alpha = w_F / (w_F + w_B) with w_F = D_F^{-r} * P_F. The geodesic/KDE work runs
-    on a downscaled crop for speed and the band alpha is upsampled back.
-
-    Args:
-        frame_bgr: H x W x 3 BGR frame.
-        trimap: Trimap for this frame.
-        distance_power: Exponent r applied to the geodesic distances, r in (0, 2].
-
-    Returns:
-        H x W float32 opacity map in [0, 1].
+    Opacity map alpha in [0, 1] for one frame. Confident fg gets 1, confident bg
+    gets 0, and band pixels get alpha = w_F / (w_F + w_B) with w_F = D_F^{-r} * P_F.
     """
     alpha = trimap.fg.astype(np.float32)
     row0, row1, col0, col1 = trimap.bbox
@@ -224,17 +158,17 @@ def estimate_alpha(
     h_c, w_c = band_c.shape
 
     # The geodesic/KDE part is the bottleneck, so run it on a downscaled crop and
-    # upsample the band alpha back; confident FG/BG stay crisp from the full-res mask.
+    # upsample the band alpha back; confident fg/bg stay crisp from the full-res mask.
     hs, ws = max(h_c // ALPHA_SCALE, 1), max(w_c // ALPHA_SCALE, 1)
-    color_s = cv_resize(frame_bgr[row0:row1, col0:col1], (ws, hs), interpolation=INTER_LINEAR).astype(np.float32)
-    band_s = cv_resize(band_c.astype(np.uint8), (ws, hs), interpolation=INTER_NEAREST).astype(bool)
-    fg_s = cv_resize(trimap.fg[row0:row1, col0:col1].astype(np.uint8), (ws, hs), interpolation=INTER_NEAREST).astype(bool)
-    bg_s = cv_resize(trimap.bg[row0:row1, col0:col1].astype(np.uint8), (ws, hs), interpolation=INTER_NEAREST).astype(bool)
+    color_s = cv2.resize(frame_bgr[row0:row1, col0:col1], (ws, hs), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    band_s = cv2.resize(band_c.astype(np.uint8), (ws, hs), interpolation=cv2.INTER_NEAREST).astype(bool)
+    fg_s = cv2.resize(trimap.fg[row0:row1, col0:col1].astype(np.uint8), (ws, hs), interpolation=cv2.INTER_NEAREST).astype(bool)
+    bg_s = cv2.resize(trimap.bg[row0:row1, col0:col1].astype(np.uint8), (ws, hs), interpolation=cv2.INTER_NEAREST).astype(bool)
 
-    # ring: band + 1px so the seeds just inside FG / outside BG carry a P_F value;
+    # ring: band + 1px so the seeds just inside fg / outside bg carry a P_F value;
     # sample_region: a few px more, for richer boundary color samples.
-    ring = cv_dilate(band_s.astype(np.uint8), _disk(1)).astype(bool)
-    sample_region = cv_dilate(band_s.astype(np.uint8), _disk(SAMPLE_RING_PX)).astype(bool)
+    ring = cv2.dilate(band_s.astype(np.uint8), _disk(1)).astype(bool)
+    sample_region = cv2.dilate(band_s.astype(np.uint8), _disk(SAMPLE_RING_PX)).astype(bool)
     fg_samples = _subsample(color_s[fg_s & sample_region].astype(np.float64), KDE_MAX_SAMPLES)
     bg_samples = _subsample(color_s[bg_s & sample_region].astype(np.float64), KDE_MAX_SAMPLES)
     if fg_samples.shape[0] == 0 or bg_samples.shape[0] == 0:
@@ -255,7 +189,7 @@ def estimate_alpha(
 
     alpha_s = fg_s.astype(np.float32)
     alpha_s[band_s] = band_alpha.astype(np.float32)
-    alpha_up = cv_resize(alpha_s, (w_c, h_c), interpolation=INTER_LINEAR)
+    alpha_up = cv2.resize(alpha_s, (w_c, h_c), interpolation=cv2.INTER_LINEAR)
 
     crop = alpha[row0:row1, col0:col1]
     crop[band_c] = alpha_up[band_c]
@@ -263,20 +197,12 @@ def estimate_alpha(
     return np.clip(alpha, 0.0, 1.0)
 
 
-def estimate_foreground_color(frame_bgr: np.ndarray, trimap: Trimap) -> np.ndarray:
+def estimate_foreground_color(frame_bgr, trimap):
     """
-    Estimate the pure foreground color F(x) for every pixel.
-
-    Instead of the window search that solves c = alpha*F + (1-alpha)*B for F, we use
-    the equivalent-in-spirit approximation: propagate the color of the nearest
-    confident-foreground pixel into the band, which removes the background color halo.
-
-    Args:
-        frame_bgr: H x W x 3 BGR frame.
-        trimap: Trimap for this frame.
-
-    Returns:
-        H x W x 3 foreground-color image, same dtype as frame_bgr.
+    Pure foreground color F(x) for every pixel. Instead of the window search that
+    solves c = alpha*F + (1-alpha)*B for F, propagate the color of the nearest
+    confident-foreground pixel into the band - same goal (kills the background
+    color halo), much cheaper.
     """
     fg_color = frame_bgr.copy()
     row0, row1, col0, col1 = trimap.bbox
@@ -289,125 +215,34 @@ def estimate_foreground_color(frame_bgr: np.ndarray, trimap: Trimap) -> np.ndarr
     return fg_color
 
 
-def composite(
-    alpha: np.ndarray,
-    foreground_bgr: np.ndarray,
-    background_bgr: np.ndarray,
-) -> np.ndarray:
-    """
-    Blend the estimated foreground onto the new background: J = a*F + (1-a)*B.
-
-    Args:
-        alpha: H x W opacity map in [0, 1].
-        foreground_bgr: H x W x 3 estimated foreground colors.
-        background_bgr: H x W x 3 new background, already resized to the frame size.
-
-    Returns:
-        H x W x 3 matted frame, uint8.
-    """
+def composite(alpha, foreground_bgr, background_bgr):
+    """Blend the estimated foreground onto the new background: J = a*F + (1-a)*B."""
     a = alpha[:, :, None].astype(np.float32)
     matted = a * foreground_bgr.astype(np.float32) + (1.0 - a) * background_bgr.astype(np.float32)
     return np.clip(matted, 0, 255).astype(np.uint8)
 
 
-def matte_frame(
-    frame_bgr: np.ndarray,
-    mask: np.ndarray,
-    background_bgr: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Run the full matting pipeline on a single frame.
-
-    Args:
-        frame_bgr: H x W x 3 BGR stabilized frame.
-        mask: H x W binary person mask (True/1 = person).
-        background_bgr: New background, already resized to the frame size.
-
-    Returns:
-        (matted_bgr uint8, alpha float32 in [0, 1]).
-    """
+def matte_frame(frame_bgr, mask, background_bgr):
+    """Full matting of one frame; returns (matted uint8, alpha float32 in [0, 1])."""
     trimap = build_trimap(mask)
     alpha = estimate_alpha(frame_bgr, trimap)
     foreground = estimate_foreground_color(frame_bgr, trimap)
     return composite(alpha, foreground, background_bgr), alpha
 
 
-def matte_video(
-    frames_bgr: list[np.ndarray],
-    masks: list[np.ndarray],
-    background_bgr: np.ndarray,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """
-    Matte a whole clip.
-
-    Args:
-        frames_bgr: Stabilized BGR frames.
-        masks: Binary person masks, one per frame.
-        background_bgr: New background image (any size; resized to the frame size).
-
-    Returns:
-        (matted_frames, alpha_frames) as parallel lists.
-
-    Raises:
-        ValueError: If frames and masks have different lengths.
-    """
-    if len(frames_bgr) != len(masks):
-        raise ValueError(f"frames/masks length mismatch: {len(frames_bgr)} vs {len(masks)}")
-
-    h, w = frames_bgr[0].shape[:2]
-    background_resized = cv_resize(background_bgr, (w, h), interpolation=INTER_LINEAR)
-
-    matted_frames, alpha_frames = [], []
-    for frame, mask in zip(frames_bgr, masks):
-        matted, alpha = matte_frame(frame, mask, background_resized)
-        matted_frames.append(matted)
-        alpha_frames.append(alpha)
-    return matted_frames, alpha_frames
-
-
-MASK_THRESHOLD = 127     # binary.avi is expected as 0/255 (person = 255)
-VIDEO_FOURCC = "XVID"
-
-
-def _binary_frame_to_mask(frame: np.ndarray) -> np.ndarray:
-    """
-    Turn one binary-video frame into a boolean person mask.
-
-    Handles a single- or 3-channel frame; person pixels are above MASK_THRESHOLD.
-    """
+def _binary_frame_to_mask(frame):
+    """One binary-video frame -> boolean person mask (single- or 3-channel input)."""
     if frame.ndim == 3:
         frame = frame[:, :, 0]
     return frame > MASK_THRESHOLD
 
 
-def run_matting(
-    stabilize_path: str,
-    binary_path: str,
-    background_path: str,
-    matted_path: str,
-    alpha_path: str,
-) -> int:
+def run_matting(stabilize_path, binary_path, background_path, matted_path, alpha_path):
     """
-    Read stabilize.avi + binary.avi, matte over the background, write the outputs.
-
-    Frames are streamed one at a time, so memory stays flat regardless of clip length.
-    alpha is written as a 0..255 video (round(alpha * 255), replicated to 3 channels).
-
-    Args:
-        stabilize_path: Path to the stabilized color video.
-        binary_path: Path to the binary mask video (0/255, person = 255).
-        background_path: Path to the new background image.
-        matted_path: Where to write the matted video.
-        alpha_path: Where to write the alpha video.
-
-    Returns:
-        Number of frames written.
-
-    Raises:
-        FileNotFoundError: If an input video or the background cannot be opened.
+    Read stabilize.avi + binary.avi, matte every frame over the background image,
+    write matted.avi and alpha.avi (alpha scaled to 0..255, 3-channel). Frames are
+    streamed one at a time so memory stays flat. Returns the frame count.
     """
-    import cv2  # imported here so the library has no import-time cv2-I/O dependency
-
     stab = cv2.VideoCapture(stabilize_path)
     binv = cv2.VideoCapture(binary_path)
     background = cv2.imread(background_path)

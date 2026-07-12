@@ -139,7 +139,6 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
     """
     # Get video parameters
     cap = cv2.VideoCapture(input_path)
-    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -163,6 +162,8 @@ def compute_stabilizing_transforms(input_path, smoothing_sigma=25.0, static_came
         last_motion = motion
         prev_gray = cur_gray
     cap.release()
+
+    num_frames = len(motions) + 1
 
     motions = np.array(motions, dtype=np.float64)
     trajectory = np.zeros((num_frames, 3), dtype=np.float64)   # absolute path, frame 0 at origin

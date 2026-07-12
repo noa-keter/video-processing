@@ -444,19 +444,3 @@ def run_matting(
     matted_writer.release()
     alpha_writer.release()
     return count
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    outputs = root / "Outputs"
-    outputs.mkdir(exist_ok=True)
-    n = run_matting(
-        stabilize_path=str(root / "Temp" / "stabilize_ID1_ID2.avi"),
-        binary_path=str(root / "Temp" / "binary_ID1_ID2.avi"),
-        background_path=str(root / "Inputs" / "background.jpg"),
-        matted_path=str(outputs / "matted_ID1_ID2.avi"),
-        alpha_path=str(outputs / "alpha_ID1_ID2.avi"),
-    )
-    print(f"matted {n} frames -> {outputs / 'matted_ID1_ID2.avi'}, {outputs / 'alpha_ID1_ID2.avi'}")

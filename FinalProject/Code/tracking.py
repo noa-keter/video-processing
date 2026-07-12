@@ -301,18 +301,3 @@ def run_tracking(
     with open(tracking_json_path, "w") as fp:
         json.dump(boxes, fp, indent=4)
     return frame_index
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    outputs = root / "Outputs"
-    outputs.mkdir(exist_ok=True)
-    n = run_tracking(
-        matted_path=str(outputs / "matted_ID1_ID2.avi"),
-        binary_path=str(root / "Temp" / "binary_ID1_ID2.avi"),
-        output_path=str(outputs / "OUTPUT_ID1_ID2.avi"),
-        tracking_json_path=str(outputs / "tracking.json"),
-    )
-    print(f"tracked {n} frames -> {outputs / 'OUTPUT_ID1_ID2.avi'}, {outputs / 'tracking.json'}")

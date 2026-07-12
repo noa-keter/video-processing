@@ -6,24 +6,24 @@ Two stages:
 1. Background model. Learn what each pixel usually looks like over time. Call it
    foreground when the current value disagrees. We use OpenCV's KNN subtractor: 
    it keeps a short per-pixel history and votes background when enough nearby
-   samples match in colour. Its shadow flag catches pixels that are just a darker
+   samples match in color. Its shadow flag catches pixels that are just a darker
    copy of the background - we drop those so the floor shadow stays out.
 
-2. Colour-model refinement. KNN is sure deep inside the person and far outside,
-   but fuzzy at the edge. So we build a foreground and a background colour histogram
+2. Color-model refinement. KNN is sure deep inside the person and far outside,
+   but fuzzy at the edge. So we build a foreground and a background color histogram
    from the confident regions of THIS frame and let the MAP rule settle the uncertain
    band - higher likelihood wins. The histograms are rebuilt every frame, so they
-   follow the person's clothes and the scene rather than relying on fixed colours.
+   follow the person's clothes and the scene rather than relying on fixed colors.
 
 The camera is static after stabilization, so we make two passes. Pass one warms up
 KNN over the whole clip and measures the person's height (so the morphology scales
 to the person instead of using fixed pixel counts). Pass two builds the masks: keep
 the main blob plus any nearby part (a head or leg that split off as the person walks
 in), drop distant noise. A final recall-safe step fills any pixel that's foreground
-in both neighbouring frames.
+in both neighboring frames.
 
 Outputs:
-  extracted_ID1_ID2.avi - person in real colour, black elsewhere
+  extracted_ID1_ID2.avi - person in real color, black elsewhere
   binary_ID1_ID2.avi    - foreground = 1 (stored as 255), background = 0
 """
 
@@ -73,12 +73,12 @@ def _clean(raw_mask, close_size, keep_dist, open_size=3):
     return _keep_person(mask, keep_dist)
 
 
-def _colour_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist, bins=32):
+def _color_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist, bins=32):
     """
-    Section-8 colour-model + MAP cleanup of the mask boundary.
+    Section-8 color-model + MAP cleanup of the mask boundary.
     Sure foreground = the mask's interior (eroded); sure background = well outside it
     (dilated, then inverted); the band between is uncertain. Build a foreground and a
-    background colour histogram from the sure regions of this frame, then hand each
+    background color histogram from the sure regions of this frame, then hand each
     uncertain pixel to whichever model likes it more (the MAP rule).
     """
     sure_fg = cv2.erode(mask, _ellipse(erode_fg)).astype(bool)
@@ -89,7 +89,7 @@ def _colour_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist, bins=32):
 
     bin_width = 256 // bins
     binned = (frame // bin_width).astype(np.int32)
-    bin_idx = (binned[..., 0] * bins + binned[..., 1]) * bins + binned[..., 2]   # colour -> histogram bin
+    bin_idx = (binned[..., 0] * bins + binned[..., 1]) * bins + binned[..., 2]   # color -> histogram bin
     hist_fg = np.bincount(bin_idx[sure_fg], minlength=bins ** 3).astype(np.float32)
     hist_bg = np.bincount(bin_idx[sure_bg], minlength=bins ** 3).astype(np.float32)
     hist_fg /= hist_fg.sum() + 1e-9
@@ -103,7 +103,7 @@ def _colour_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist, bins=32):
 def _temporal_fill(masks, keep_dist):
     """
     Recall-safe temporal smoothing: add back any pixel that's foreground in BOTH
-    neighbours (recovers a one-frame drop-out) and never remove anything, so
+    neighbors (recovers a one-frame drop-out) and never remove anything, so
     fast-moving parts survive.
     """
     filled = []
@@ -119,13 +119,13 @@ def _temporal_fill(masks, keep_dist):
 def run(input_path, transforms, meta, extracted_path, binary_path,
         dist2=300.0, fourcc='XVID'):
     """
-    Build the KNN background model, classify + colour-refine every stabilized frame,
-    steady the masks in time, and write the extracted (colour) and binary videos.
+    Build the KNN background model, classify + color-refine every stabilized frame,
+    steady the masks in time, and write the extracted (color) and binary videos.
     Returns the list of foreground masks.
     """
     num_frames, fps, width, height = meta
-    # dist2Threshold is the colour-distance cutoff for "same as background". It only
-    # roughs out the mask - the colour refinement redraws the boundary each frame - so
+    # dist2Threshold is the color-distance cutoff for "same as background". It only
+    # roughs out the mask - the color refinement redraws the boundary each frame - so
     # the exact value doesn't matter much. This is the one knob we tune.
     bg_model = cv2.createBackgroundSubtractorKNN(history=num_frames, dist2Threshold=dist2,
                                                  detectShadows=True)
@@ -150,12 +150,12 @@ def run(input_path, transforms, meta, extracted_path, binary_path,
     keep_dist = _odd(person_height * 0.080, 9)      # how close a detached part must be to count as body
     connect_size = _odd(person_height * 0.022, 9)   # close break-gaps (neck/knee) into one region
 
-    # pass 2: classify, clean, and colour-refine each frame
+    # pass 2: classify, clean, and color-refine each frame
     masks = []
     for frame, valid in stab.warp_frames(input_path, transforms):
         fg_mask = bg_model.apply(frame)            # 255 = foreground, 127 = shadow, 0 = background
         mask = _clean(((fg_mask == 255) & valid).astype(np.uint8), close_size, keep_dist)
-        mask = _colour_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist)
+        mask = _color_map_refine(frame, mask, erode_fg, dilate_bg, keep_dist)
         # weld the kept parts (a separately-detected head/leg) into one solid region so
         # the extracted person has no gaps; the kernel is small enough to leave the
         # natural gap between spread legs open.
@@ -170,9 +170,9 @@ def run(input_path, transforms, meta, extracted_path, binary_path,
     for i, (frame, _valid) in enumerate(stab.warp_frames(input_path, transforms)):
         mask = masks[i]
         extracted = frame.copy()
-        extracted[mask == 0] = 0                   # foreground keeps its real colours, rest goes black
+        extracted[mask == 0] = 0                   # foreground keeps its real colors, rest goes black
         ex_writer.write(extracted)
-        # binary as 3-channel 0/255 so the colour codec survives it; matting thresholds it back
+        # binary as 3-channel 0/255 so the color codec survives it; matting thresholds it back
         bin_writer.write(cv2.cvtColor(mask * 255, cv2.COLOR_GRAY2BGR))
     ex_writer.release()
     bin_writer.release()

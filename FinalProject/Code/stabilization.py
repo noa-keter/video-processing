@@ -192,7 +192,7 @@ def warp_frames(input_path, transforms):
         transform = transforms[frame_index]
         warped = cv2.warpAffine(frame, transform, (width, height), flags=cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-        # nearest-neighbour keeps the mask a clean yes/no (no grey border bleed)
+        # nearest-neighbor keeps the mask a clean yes/no (no gray border bleed)
         valid = cv2.warpAffine(full_mask, transform, (width, height), flags=cv2.INTER_NEAREST,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
         yield warped, valid
